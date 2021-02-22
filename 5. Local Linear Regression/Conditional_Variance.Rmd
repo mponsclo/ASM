@@ -1,0 +1,190 @@
+---
+title: "Estimating the conditional variance by local linear regression"
+author: "Marcel Pons"
+date: "12/7/2020"
+output: html_document
+---
+```{r setup, include=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(sm)
+library(KernSmooth)
+library(ggplot2)
+library(gridExtra)
+```
+
+# Aircraft Data
+In this homework we are going to use the `Aircraft` data from the `sm` library, which consists of records on six characteristics of aircraft designs which appeared during the twentieth century. From this data, we are going to build a non parametric local linear regression using `Year` as the explanatory variable and the logarithm of `Weight` as response variable (maximum take-off weight in kg). 
+
+Two local linear regression models will be built, one using the created function `locpolreg` and the other using the `sm.regression` function from the `sm` library. For each model the optimal bandwith value *h* will be found and used for constructing the final models.
+
+Finally, the conditional variance $\sigma^2$ will be estimated for each model.
+
+```{r import data, message=FALSE}
+data(aircraft)
+attach(aircraft)
+Year <- Yr
+lgWeight <- log(Weight)
+source("/Users/mponsclo/Library/Mobile Documents/com~apple~CloudDocs/MIRI Data Science/3rd Term/3_ASM/5.Nonparametric_Regression/R scripts for Local polynomial regression-20201206/lpr_visual.R")
+source("/Users/mponsclo/Library/Mobile Documents/com~apple~CloudDocs/MIRI Data Science/3rd Term/3_ASM/5.Nonparametric_Regression/R scripts for Local polynomial regression-20201206/locpolreg.R")
+```
+
+## ------ Choosing the Bandwith value -------- 
+Two methodologies will be followed in order to find the optimal bandwidth value: *Leave-one-out cross validation* for the `logpolreg` model and *direct plug-in* for `sm.regression` (using `dpill` from `KernSmooth`).
+
+#### Leave one out cross validation
+For the first aforementioned methodology we use the built function `h.loocv`, which given the vectors $x$, $y$ and a vector of candidate values of $h$ it returns the PMSE of the local regression for each $h$. If we plot the PMSE value for each value of $h$, we can appreciate that the best bandwidth value $h$ is $4.417$
+```{r LOOCV Function}
+h.loocv <- function(x, y, h.v = exp(seq(log(diff(range(x))/20),
+                                        log(diff(range(x))/4),l=10)), 
+                    p=1,type.kernel="normal"){
+  n <- length(x)
+  cv <- h.v*0
+  for (i in (1:length(h.v))){
+    h <- h.v[i]
+    aux <- locpolreg(x=x,y=y,h=h,p=p,tg=x,
+                     type.kernel=type.kernel, doing.plot=FALSE)
+    S <- aux$S      # Smoothing matrix
+    h.y <- aux$mtgr # Estimated values of the r-th derivative of the regression function                     # at points in vector tg
+    hii <- diag(S)
+    av.hii <- mean(hii)
+    cv[i] <- sum(((y-h.y)/(1-hii))^2)/n #loocv
+  }
+  return(list(h.v=h.v,cv=cv))
+}
+```
+```{r Choosing the best h}
+#exp(seq(from = log(diff(range(lgWeight)))/30, to = log(diff(range(lgWeight)))/5, length.out =10))
+h.v <- exp(seq(from=log(0.3), to=log(15), length=17))
+pmse <- h.loocv(x=Year, y=lgWeight, h.v=h.v)
+
+y.max <- max(pmse$cv)
+y.min <- min(pmse$cv)
+
+plot(h.v,pmse$cv,ylim=c(y.min,y.max),ylab="Estimated MSPE", xlab = "Bandwidth Value",
+     main="Estimated MSPE by LOOCV")
+lines(h.v,pmse$cv)
+abline(v = h.v[which.min(pmse$cv)],col=4, lty=4, lwd = 0.8)
+optimal_h <- h.v[which.min(pmse$cv)]
+```
+
+```{r include=FALSE}
+op <- par(mfrow=c(2,2))
+lpr_visual(x=Yr,y=lgWeight,h=optimal_h,q=0,tg=c(20,40,60),
+           xlim=c(10,90), ylim=c(3,12),
+           xlab="Yr", ylab="lgWeight",
+           main='Degree local pol.: q = 0',type.kernel="normal")
+lpr_visual(x=Yr,y=lgWeight,h=optimal_h,q=1,tg=c(20,40,60),
+           xlim=c(10,90), ylim=c(3,12),
+           xlab="Yr", ylab="lgWeight",
+           main='Degree local pol.: q = 1',type.kernel="normal")
+lpr_visual(x=Yr,y=lgWeight,h=optimal_h,q=2,tg=c(20,40,60),
+           xlim=c(10,90), ylim=c(3,12),
+           xlab="Yr", ylab="lWeight",
+           main='Degree local pol.: q = 2',type.kernel="normal")
+lpr_visual(x=Yr,y=lgWeight,h=optimal_h,q=3,tg=c(20,40,60),
+           xlim=c(10,90), ylim=c(3,12),
+           xlab="Yr", ylab="lgWeight",
+           main='Degree local pol.: q = 3',type.kernel="normal")
+```
+
+#### Dierect plug-in.
+For the other model, as stated before, we use the specific bandwidth selector for local regression: *direct plug-in*.
+```{r}
+h.cv.sm <- h.select(x=Year, y=lgWeight, method='cv')
+h.dpi <- dpill(x=Year, y=lgWeight,gridsize = 101, range.x = range(Year))
+```
+
+```{r include=FALSE}
+sm.regression(x=Year,y=lgWeight,h=optimal_h,pch=1,cex=1,lwd=2)
+sm.regression(x=Year,y=lgWeight,h=h.dpi,add=TRUE,col=2,lwd=2)
+legend("topright",c("h by leave-one-out CV","h by direct plug-in"),col=c(1,2),lty=1,lwd=2)
+```
+
+# Estimating the conditional variance
+In order to estimate the conditional variance of $\texttt{lgWeigth}$ given $\texttt{Yr}$ for the two models, we apply the following procedure:
+1. Fit a non-paremetric regression to data ($x_i,y_i$) and save the estimated values $\hat{m}(x_i)$.
+2. Transform the estimated residuals $\hat{\epsilon}=y_i-\hat{m}(x_i)$ $\rightarrow$ $z_i=log \ \hat{\epsilon_i}^2 = log((y_i - \hat{m}(x_i))^2)$
+3. Fit a nonparametric regression to data ($x_i, z_i$) and call the estimated function $\hat{q}(x)$. Observe that $\hat{q}(x)$ is an estimate of $log \ \sigma^2(x)$.
+4. Estimate $\sigma^2(x)$ by $\sigma^2(x)=e^{\hat{q}(x)}$
+
+And once we have the estimation, we plot $\hat{\epsilon}_i^2$ against $x_i$ and superimpose the estimated function $\sigma^2(x)$ and also we plot the function $\hat{m}(x)$ and superimpose the bands $\hat{m}(x) \pm 1,96\hat{\sigma}(x)$.
+
+#### ------ LOGPOLREG -------
+```{r nonparametric estimation}
+lpg.model <- locpolreg(x=Year,y=lgWeight,h=optimal_h,q=1,tg=Year, doing.plot = FALSE)
+m.hat <- lpg.model$mtgr
+
+aux <- sort(Year,index.return=T)
+sorted.tg <- Year[aux$ix]
+sorted.tg.ix <- aux$ix
+plot(Year,lgWeight,col="grey")
+lines(sorted.tg, m.hat[sorted.tg.ix],col=1,lwd=2)
+```
+
+```{r transformation estimated values}
+e_sq <- (lgWeight-m.hat)**2
+z <- log(e_sq)
+```
+
+```{r nonparametricregression 1}
+q <- locpolreg(x=Year,y=z,h=optimal_h,q=1,tg=Year, doing.plot = FALSE)
+
+aux <- sort(Year,index.return=T)
+sorted.tg <- Year[aux$ix]
+sorted.tg.ix <- aux$ix
+plot(Year,z,col="grey")
+lines(sorted.tg, q$mtgr[sorted.tg.ix],col=1,lwd=2)
+```
+```{r estimation of sigma}
+sigma <- exp(q$mtgr)
+```
+
+```{r first plot}
+aux <- sort(Year,index.return=T)
+sorted.tg <- Year[aux$ix]
+sorted.tg.ix <- aux$ix
+plot(Year,e_sq,col="grey", ylab=bquote(epsilon^2), xlab='x')
+lines(sorted.tg, sigma[sorted.tg.ix],col=4,lwd=2)
+```
+
+```{r second plot}
+aux <- sort(Year,index.return=T)
+sorted.tg <- Year[aux$ix]
+sorted.tg.ix <- aux$ix
+plot(Year,lgWeight,col="grey")
+lines(sorted.tg, m.hat[sorted.tg.ix],col=1,lwd=2)
+lines(sorted.tg,m.hat[sorted.tg.ix]+1.96*sigma[sorted.tg.ix],col='#660000',lty=2, lwd=2)
+lines(sorted.tg,m.hat[sorted.tg.ix]-1.96*sigma[sorted.tg.ix],col='#660000',lty=2, lwd=2)
+```
+#### ------ SM.REGRESSION -----
+```{r fitting}
+sm.lpr <- sm.regression(x=Year,y=lgWeight,h=h.dpi, eval.points=Year)
+m.hat.sm <- sm.lpr$estimate
+
+aux.sm <- sort(Year,index.return=T)
+sorted.tg.sm <- Year[aux$ix]
+sorted.tg.ix.sm <- aux$ix
+plot(Year,lgWeight,col="grey")
+lines(sorted.tg.sm, m.hat.sm[sorted.tg.ix.sm],col=1,lwd=2)
+```
+
+```{r estimation}
+e_sq.sm <- (lgWeight - m.hat.sm)**2
+z.sm <- log(e_sq.sm)
+
+q.sm<- sm.regression(x=Year,y=z,h=h.dpi,eval.points=Year)
+sigma.sm <- exp(q.sm$estimate)
+```
+
+```{r plots}
+plot(Year,e_sq.sm,col="grey", ylab=bquote(epsilon^2), xlab='x')
+lines(sorted.tg.sm, sigma[sorted.tg.ix.sm],col='#000066',lwd=2)
+
+plot(Year,lgWeight,col="grey")
+lines(sorted.tg.sm, m.hat.sm,col=1,lwd=2)
+lines(sorted.tg.sm, m.hat.sm[sorted.tg.ix.sm]+1.96*sigma.sm[sorted.tg.ix.sm],col='#006633',lty=2, lwd=2)
+lines(sorted.tg.sm, m.hat.sm[sorted.tg.ix.sm]-1.96*sigma.sm[sorted.tg.ix.sm],col='#006633',lty=2, lwd=2)
+```
+
+### Comparissons 
+By comparison of the plots it can be appreciated that both functions of the linear local regression with the bandwidth value chosen with different techniques are very similar. From Figure \ref{fig:secondplot} a little difference can be appreciated in the bands $\hat{m}(x) \pm 1,96\hat{\sigma}(x)$, which are slightly wider (almost inappreciable) when using a smaller $h$ ($4.417$). This fact makes sense because the smaller is the $h$ value, the more flexible is the model.

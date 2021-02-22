@@ -1,0 +1,212 @@
+---
+title: "Report 1. Linear Models"
+author: "Marcel Pons"
+date: "4/28/2020"
+output:
+  word_document: default
+  pdf_document: default
+---
+```{r Setup Libraries, include=FALSE, message=F}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(tibble)
+library(car)
+library(ggplot2)
+library(PerformanceAnalytics) # to plot histograms
+library(corrplot)
+library(RColorBrewer)
+library(ggcorrplot)
+library(gridExtra)
+library(emmeans)
+library(effects)
+```
+# -------------------------------------------
+# 1. IMDB Dataset
+```{r ImportDataset,include=FALSE}
+path <- "~/Documents/MIRI/3_ASM/Homeworks/1. Linear Models/IMDB.csv"
+df <- read.csv(path, sep=";", header = T)
+rm(path)
+```
+
+## 2. Description + Preprocessing
+A basic description of the dataset is provided using the `summary` function in R. 
+```{r Summary, echo=FALSE}
+summary(df[,-1]) # without movie title
+```
+
+```{r Year to Categorical}
+# Years go from 2000 to 2016
+Years_bins <- c(2005, 2010)
+Years_modalities <- c("2000-2005","2006-2010","2011-2016")
+df$titleyear[which(df$titleyear<=Years_bins[1])] <- Years_modalities[1]
+df$titleyear[which(df$titleyear>Years_bins[1] & df$titleyear<=Years_bins[2])] <- Years_modalities[2] 
+df$titleyear[which(df$titleyear>Years_bins[2])] <- Years_modalities[3]
+
+df$titleyear <- as.factor(df$titleyear)
+df <- rename(df, yearcat = titleyear)
+df <- rename(df, facespost = facenumber_in_poster)
+rm(Years_bins, Years_modalities)
+
+# Look whether the levels are well balanced
+table(df$yearcat) 
+table(df$genre)
+```
+
+## 3. Exploratory Data Analysis
+```{r Pairs and Correlations in normal df, echo=FALSE}
+pairs(~.,df[,-c(1,5,12)])
+
+M <- cor(df[,-c(1,5,12)])
+ggcorrplot(M,
+           hc.order = TRUE,
+           type = "lower",
+           lab = TRUE)
+```
+
+```{r Gross and Budget to log scale, include=FALSE}
+df_log <- df
+df_log <- df_log %>%
+  mutate(loggross = log(gross)) %>%
+  mutate(logbudget = log(budget)) %>%
+  select(-c(gross, budget)) %>%
+  select(loggross, logbudget, everything()) %>%
+  column_to_rownames('movietitle')
+```
+
+```{r Facebook likes to Logarithm scale, include=FALSE}
+df_log <- rownames_to_column(df_log, var="movietitle")
+zero_likes <- filter(df_log, actor1fl == 0) %>%
+  mutate(logact1fl = 0)
+df_Alllog <- df_log %>%
+  filter(actor1fl > 0) %>% 
+  mutate(logact1fl = log(actor1fl))
+df_Alllog <- rbind(df_Alllog, zero_likes)
+
+zero_likes <- filter(df_Alllog, actor2fl == 0) %>%
+  mutate(logact2fl = 0)
+df_Alllog <- df_Alllog %>%
+  filter(actor2fl > 0) %>% 
+  mutate(logact2fl = log(actor2fl))
+df_Alllog <- rbind(df_Alllog, zero_likes)
+
+zero_likes <- filter(df_Alllog, actor3fl == 0) %>%
+  mutate(logact3fl = 0)
+df_Alllog <- df_Alllog %>%
+  filter(actor3fl > 0) %>% 
+  mutate(logact3fl = log(actor3fl))
+df_Alllog <- rbind(df_Alllog, zero_likes)
+
+zero_likes <- filter(df_Alllog, castfl == 0) %>%
+  mutate(logcastfl = 0)
+df_Alllog <- df_Alllog %>%
+  filter(castfl > 0) %>% 
+  mutate(logcastfl = log(castfl))
+df_Alllog <- rbind(df_Alllog, zero_likes)
+
+zero_likes <- filter(df_Alllog, directorfl == 0) %>%
+  mutate(logdirfl = 0)
+df_Alllog <- df_Alllog %>%
+  filter(directorfl > 0) %>% 
+  mutate(logdirfl = log(directorfl))
+df_Alllog <- rbind(df_Alllog, zero_likes)
+
+zero_likes <- filter(df_Alllog, facespost == 0) %>%
+  mutate(logfaces = 0)
+df_Alllog <- df_Alllog %>%
+  filter(facespost > 0) %>% 
+  mutate(logfaces = log(facespost))
+df_Alllog <- rbind(df_Alllog, zero_likes)
+
+df_Alllog <- select(df_Alllog, movietitle, loggross, logbudget, duration, yearcat, logdirfl, logact1fl, logact2fl, logact3fl, logcastfl, logfaces, genre)
+
+df <- column_to_rownames(df,'movietitle')
+df_log <- column_to_rownames(df_log,'movietitle')
+df_Alllog <- column_to_rownames(df_Alllog,'movietitle')
+rm(zero_likes)
+```
+```{r Correlations in ALLlog df, echo=FALSE}
+#summary(df_Alllog)
+pairs(~.,df_Alllog[,-c(4,11)])
+M <- cor(df_Alllog[,-c(4,11)])
+ggcorrplot(M,
+           hc.order = TRUE,
+           type = "lower",
+           lab = TRUE)
+rm(M)
+```
+
+```{r Boxplots and density plot, echo=FALSE}
+# Faceted Boxplot 
+a <- ggplot(df_log, aes(x=genre, y = loggross)) + geom_boxplot() + facet_wrap(~yearcat) + ylab('Log (gross)') + xlab('')
+a
+rm(a)
+
+# Density Plot gross-genre , gross-year
+ggplot(df_log, aes(x=loggross, fill = genre)) + geom_density(alpha = .3)
+ggplot(df_log, aes(x=loggross, fill = yearcat)) + geom_density(alpha = .3)
+```
+
+# ------\\\\\-----------------------\\\\\--------------
+# 4. Linear Regression 
+```{r Fitting the complete model}
+model <- lm(log(gross) ~ (. - yearcat - genre)*(genre+yearcat)+genre:yearcat, data=df)
+summary(model)
+```
+
+```{r VIF of the complete model, include=FALSE}
+car::vif(model)
+```
+
+
+```{r Stepwise selection with BIC, echo=FALSE}
+model <- step(model, direction = 'back', k = log(nrow(df)))
+```
+
+```{r Stepwise final model}
+summary(model)
+```
+
+```{r Check multicolinearity}
+vif(model)
+```
+
+```{r remove genre?, include=FALSE}
+model_f <- lm(log(gross) ~ budget + duration + yearcat, data=df)
+summary(model_f)
+```
+
+# 5. Validation
+```{r Assessing homoscedasticity, echo=FALSE}
+op <- par(mfrow=c(1,2))
+plot(model,1)
+plot(model,3)
+par(op)
+```
+
+```{r Assessing normality, echo=FALSE}
+plot(model, 2)
+shapiro.test(resid(model))
+```
+
+```{r Infuential points and Outliers, echo=FALSE}
+plot(model,5)
+```
+
+# 6. Interpretation & Conclusions
+```{r summary3}
+summary(model)
+```
+
+```{r interpretation of the interactions, include=FALSE}
+plot(allEffects(model))
+```
+
+```{r Two new instances, echo=FALSE}
+dfnew=data.frame(gross=c(64001297,127968405), budget = c(1.50e+07, 8.00e+07), duration = c(94,138), yearcat = c('2006-2010', '2006-2010'), directorfl = c(87, 17000 ), actor1fl = c(17000, 29000), actor2fl = c(975, 223), actor3fl = c(569,163), castfl = c(20154,29585),  facesoost=c(1,0),genre = c('Comedy', 'Terror'))
+```
+
+```{r Prediction}
+exp(predict(model,newdata=dfnew,interval="prediction"))
+exp(predict(model,newdata=dfnew,interval="confidence"))
+```
+

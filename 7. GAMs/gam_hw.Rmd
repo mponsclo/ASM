@@ -1,0 +1,142 @@
+---
+title: "GAM fit for Hirsutism Data"
+author: "Marcel Pons Cloquells"
+date: "`r Sys.Date()`"
+fontsize: 12
+#bibliography: dummy.bibtex
+output:
+  pdf_document:
+    # toc: true
+    # toc_depth: 1  # upto three depths of headings (specified by #, ## and ###)
+    fig_width: 6
+    fig_height: 4
+    fig_caption: true
+    # df_print: kable
+    # highlight: tango
+    # geometry: margin=3cm
+    # latex_engine: xelatex
+  html_document:
+    toc: true
+    toc_depth: 3  # upto three depths of headings (specified by #, ## and ###)
+    number_sections: true  ## if you want number sections at each table header  theme: united
+    df_print: kable
+---
+
+```{r setup, include=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(sm)
+library(ggplot2)
+library(mgcv)
+setwd('/Users/mponsclo/Library/Mobile Documents/com~apple~CloudDocs/MIRI Data Science/3rd Term/3_ASM/7.Generalized_Additive_Models/Assignment')
+
+# start with a clean slate
+rm(list=ls())
+
+# set figure sizes in knittr https://sebastiansauer.github.io/figure_sizing_knitr/
+knitr::opts_chunk$set(out.width = '70%', fig.align = "center") 
+# make results reproducible, to some extent
+set.seed(42)
+options(show.signif.stars=TRUE, show.signif.code = TRUE, show.coef.Pvalues = TRUE)
+```
+
+# Hirsutism Dataset
+Hirsutism is the excessive hairness on women in those parts of the body where terminal hair does not normally occur or is minimal -for example, a beard or chest hair. It refers to a male pattern of body hair (androgenic hair) and it is therefore primarily of cosmetic and psychological concern.
+Hirsutism is a symptom rather than a disease and may be a sign of a more serious medical condition, especially if it develops well after puberty.
+
+The amount and location of the hair is measured by a Ferriman-Gallwey score. The original method used 11 body areas to assess hair growth, but was decreased to 9 body areas in the modified method: Upper lip, Chin, Chest, Upper back, Lower back, Upper abdomen, Lower abdomen, Upper arms, Thighs, Forearms (deleted in the modified method) and Legs (deleted in the modified method). In the modified method, hair growth is rated from 0 (no growth of terminal hair) to 4 (extensive hair growth) in each of the nine locations. A patient's score may therefore range from a minimum score
+of 0 to a maximum score of 36 (9x4).
+
+A clinical trial was conducted to evaluate the effectiveness of an anti-androgen combined with an oral contraceptive in reducing hirsutism for 12 consecutive months. It is known that contraceptives have positive effects on reduction of hirsutism. The degree of hirsutism is measured by the modified Ferriman-Gallwey scale. Patients were randomized into 4 treatment levels: levels 0 (only contraceptive), 1, 2, and 3 of the antiandrogen in the study (always in combination with the contraceptive). The clinical trial was double-blind.
+
+The data set `hirsutism.dat` contains artificial values of measures corresponding to some patients in this study. The variables are the following:
+
+- *Treatment*, with values 0,1,2 or 3.
+- *FGm0*, it indicates the baseline hirsutism level at the randomization moment (the beginning of the clinical trial). Only women with baseline FG values greater than 15 where recruited.
+- *FGm3*, FG value at 3 months.
+- *FGm6*, FG value at 6 monts.
+- *FGm12*, FG value at 12 months, the end of the trial.
+- *SysPres*, baseline diastolic blood pressure.
+- *DiaPres*, baseline diastolic blood pressure.
+- *weight*, baseline weight.
+- *height*, baseline height.
+
+* The term "baseline" means that these variables were measured at the beginning of the clinical trial. 
+```{r Load Data, include=FALSE}
+source("/Users/mponsclo/Library/Mobile Documents/com~apple~CloudDocs/MIRI Data Science/3rd Term/3_ASM/7.Generalized_Additive_Models/Assignment/Hirsutism_data.R")
+head(hirs)
+hirs <- hirs %>% drop_na()
+attach(hirs)
+```
+
+# GAMs for histusitm data
+Fit several GAM models (including semiparametric models) explaining *FGm12* as a function of the variables that were measured at the beginning of the clinical trial (including *FGm0*) and Treatment (treated as factor). Use functions `summary`, `plot` and `vis.gam` to get an insight into the fitted models.
+
+Then use function `anova` to select among them the model (or models) that you think is (are) the most appropriate.
+
+```{r Linear Model, include=FALSE}
+hirs$Treatment <- as.factor(hirs$Treatment)
+model0 <- gam(FGm12 ~ FGm0 + Treatment + SysPres + DiaPres + weight + height, data=hirs)
+summary(model0)
+```
+
+### Model 1
+```{r Additive Model 1}
+model1 <- gam(FGm12 ~ s(FGm0) + Treatment + s(SysPres) + s(DiaPres) + s(weight) + s(height), data=hirs)
+summary(model1)
+plot(model1,pages=1,residuals=TRUE, shade=TRUE, cex=1, pch=1)
+```
+
+```{r include=FALSE}
+anova(model0, model1, test="F")
+```
+
+### Model 2
+```{r Additive Model 3. Semiparametric}
+model2 <- gam(FGm12 ~ s(FGm0) + Treatment + SysPres + DiaPres + weight + height, data=hirs)
+summary(model2)
+```
+```{r include=FALSE}
+anova(model2, model1, test = "F")
+```
+
+### Model 3
+```{r Additive Model 4. Exclude variables}
+model3 <- gam(FGm12 ~ s(FGm0) + Treatment, data=hirs)
+summary(model3)
+plot(model3,pages=1,residuals=TRUE, shade=TRUE, shade.col = "lightblue", cex=1, pch=1, shift = coef(model3)[1])
+vis.gam(model3, phi=25, theta =40)
+
+gam.check(model3)
+```
+```{r include=FALSE}
+anova(model3, model2, test="F")
+```
+
+### Model 4
+```{r}
+model4 <- gam(FGm12 ~ s(FGm0, by=Treatment), data=hirs)
+summary(model4)
+options(show.signif.stars=FALSE, show.signif.code = FALSE, show.coef.Pvalues = TRUE)
+plot(model4,pages=1,residuals=TRUE, shade=TRUE, cex=1, pch=1)
+```
+
+```{r include=FALSE}
+anova(model3, model4, test = "F")
+```
+
+
+------ Other models tried. --------
+### Model 5
+When we have smooth-factor interactions, we want to also include a varying intercept, in case the different categories are different in overall means in addition to shape of their smooths.
+```{r include=FALSE}
+model5 <- gam(FGm12 ~ s(FGm0, by=Treatment) + Treatment, data=hirs)
+summary(model5)
+options(show.signif.stars=FALSE, show.signif.code = FALSE, show.coef.Pvalues = TRUE)
+plot(model5,pages=1,residuals=TRUE, shade=TRUE, cex=1, pch=1)
+```
+
+```{r, include=FALSE}
+anova(model3, model5, test = "F")
+gam.check(model5)
+```

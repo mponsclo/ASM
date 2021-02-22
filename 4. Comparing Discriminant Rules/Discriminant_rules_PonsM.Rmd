@@ -1,0 +1,302 @@
+---
+title: "Comparing Discriminant Rules"
+author: "Marcel Pons Cloquells"
+date: "11/27/2020"
+output: html_document
+---
+```{r setup, include=FALSE}
+setwd("~/Documents/MIRI/ASM/Discriminant_rules/Data")
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(ggplot2)
+#library(kernlab) 
+library(glmnet)
+library(class)
+library(caret)
+library(pROC)
+library(e1071)
+```
+
+## 1. Loading the Spam Dataset
+In this homework, several classification techniques will be performed upon the \texttt{Spam\ Database} in order to predict if a new email will be spam or not. The different classifiers considered (\emph{Logistic Regression}, \emph{Lasso Regression} \& \emph{Knn}) will be compared in terms of \emph{Misclassification Rate}, \emph{AUC} and \(\ell_{val}\) measure.
+```{r loading the data}
+# data(spam) import from kernlab package
+spam <- read.csv("~/Documents/MIRI/ASM/Discriminant_rules/Data/spambase.data", header=FALSE)
+spam.names <- c(read.table("spambase.names",sep=":",skip=33,nrows=53,as.is=TRUE)[,1],
+                "char_freq_#",
+                read.table("spambase.names",sep=":",skip=87,nrows=3,as.is=TRUE)[,1],
+                "spam.01")
+names(spam) <- spam.names 
+rm(spam.names)
+```
+Every row of this data corresponds to an e-mail message, the last column named `spam.01` is a factor denoting whether the email message was *spam* or *nonspam*. According to the information on the repository where this data was posted, the columns have the following meaning:
+
+- __columns 1:48__ correspond to the relative frequence (in %) of the word represented by that column
+- __columns 49:54__ correspond to the relative frequence (in %) of the character represented by the column
+- __columns 55:57__ correspond to different counts of capital letters (namely average length of capital words, length of longest capital word, and total number of capital letters in email)
+- last __column 58__ contains the type: spam/nonspam
+
+```{r Data descrpition}
+n<-dim(spam)[1]
+p<-dim(spam)[2]-1
+
+spam.01 <- spam[,p+1] # getting response variable
+spam.vars <- as.matrix(spam[,1:p])
+
+cat(paste("n = ",n,', p = ',p,sep=""))
+cat(paste("\nProportion of spam e-mails = ",round(mean(spam.01),2),sep=""))
+
+#glm.spam <- glm(spam.01 ~ spam.vars,family=binomial)
+#summary(glm.spam)
+
+rm(p,n,spam.01, spam.vars)
+```
+
+## 2. Spliting data into train & test sets (balanced)
+In order to proceed with the proposed classification techniques, the data is divided into two sets: 2/3 of the data is selected for the training set and the remaining 1/3 for the test set. Furthermore, since we want to keep the number of \textbf{spam emails} balanced between the two sets (proportion \(0.39\) in the whole dataset), 2/3 of spam emails are selected for the training set and 1/3 for the test set, following the same procedure for the \textbf{no-spam} e-mails. 
+```{r splitting}
+set.seed(4321)
+
+# Split
+spam_yes <- filter(spam, spam.01 == 1)
+spam_no <- filter(spam, spam.01 == 0)
+
+learn_spam <-  sample(1:nrow(spam_yes), round(2/3*nrow(spam_yes)))
+train_yes <- spam_yes[learn_spam,]
+test_yes <-  spam_yes[-learn_spam,]
+
+learn_nospam <- sample(1:nrow(spam_no), round(2/3*nrow(spam_no)))
+train_no <- spam_no[learn_nospam,]
+test_no <- spam_no[-learn_nospam,]
+
+# Merge levels
+spam_train <-  rbind(train_yes, train_no)
+spam_test <- rbind(test_yes, test_no)
+
+# Shuffle the data
+rows_t <- sample(nrow(spam_train))
+spam_train <- spam_train[rows_t, ]
+
+rows_ts <- sample(nrow(spam_test))
+spam_test <- spam_test[rows_ts, ]
+
+# Check for desired result
+total.spams <- (spam %>% filter(spam.01 == 0) %>% count(spam.01))[2]
+total.spams.train <- (spam_train %>% filter(spam.01 == 0) %>% count(spam.01))[2]
+total.spams.test <- (spam_test %>% filter(spam.01 == 0) %>% count(spam.01))[2]
+cat(paste("Proportion of no-spam e-mails in the train set = ",round(total.spams.train/total.spams,3),sep=""))
+cat(paste("\nProportion of no-spam e-mails in the train set = ",round(total.spams.test/total.spams,3),sep=""))
+
+total.spams <- (spam %>% filter(spam.01 == 1 ) %>% count(spam.01))[2]
+total.spams.train <- (spam_train %>% filter(spam.01 == 1) %>% count(spam.01))[2]
+total.spams.test <- (spam_test %>% filter(spam.01 == 1) %>% count(spam.01))[2]
+cat(paste("\nProportion of spam e-mails in the train set = ",round(total.spams.train/total.spams,3),sep=""))
+cat(paste("\nProportion of spam e-mails in the train set = ",round(total.spams.test/total.spams,3),sep=""))
+
+rm(spam_yes,spam_no, learn_spam, train_yes, test_yes, learn_nospam, train_no, test_no, rows_t, rows_ts, total.spams, total.spams.test, total.spams.train)
+```
+
+## 3. Classification rules
+In order to compute the \(\ell_{val}\) measure for the three performed models, we have created the function \texttt{l\_val()} that computes this measure given the vector of probabilities for spam/no-spam (using the \texttt{test\_data} to predict them).
+
+```{r l_val function}
+l_val <- function(prob_pred){
+  sum_l = 0
+  for (i in 1:length(prob_pred)){
+    iter = spam_test[i,58]*log(as.vector(prob_pred[i])+1e-6) + (1-spam_test[i,58])*log(1-as.vector(prob_pred[i])+1e-6)
+    if(is.nan(iter) == FALSE){
+    sum_l = sum_l + iter
+    }
+  }
+  l_val = sum_l/length(prob_pred) 
+  return(l_val)
+}
+```
+
+### 3.1. Logistic regression fitted by maximum likelihood
+A logistic regression model is performed using the \texttt{glm()} function with \texttt{family=binomial}. Since we are going to use the centered and standardized data for the \emph{lasso} and \emph{knn} models, we have chosen to do the same for the linear regression (although it could be performed without doing so), in this way the comparisons are going to be with the same scale for all the three models.
+
+```{r logistic regression glm, warning=FALSE, message=FALSE}
+spam_train_s <- spam_train
+spam_train_s[,-58] <- as.data.frame(scale(spam_train_s[,-58]))
+
+spam_test_s <- spam_test
+spam_test_s[,-58] <- as.data.frame(scale(spam_test_s[,-58]))
+glm.spam <- glm(spam.01~.,data = spam_train_s, family=binomial)
+# summary(glm.spam)
+```
+
+With the \texttt{glm.spam} model we predict the probability of a message to be spam for the unseen \texttt{spam\_test} data. These probabilities are going to be used to plot the \emph{ROC} and compute the \emph{AUC} and \(\ell_{val}\). By setting a cut point, all messages with higher probability than 1/2 are going to be considered \textbf{spam} (1) and
+\textbf{no-spam} (0) otherwise. We use this classification to build the confusion matrix and measure the misclassification rate.
+
+```{r prediction glm}
+# Predicting the test set
+prob_pred <- predict(glm.spam, type = "response", newdata = spam_test_s[,-58])
+
+y_pred = ifelse(prob_pred > 0.5, 1, 0)
+
+# Making the Confusion Matrix
+cm = table(spam_test[, 58], y_pred > 0.5)
+mr_glm <-  (cm[1,2]+cm[2,1])/sum(cm)
+cat(paste("Misclassification Rate Logistic Regression = ",round(mr_glm,4),sep=""))
+```
+
+```{r ROC curve}
+par(pty="s")
+#roc(spam_train$spam.01, glm.spam$fitted.values, plot = TRUE, legacy.axes=TRUE, col="#377eb8", lwd = 2, print.auc = TRUE, print.auc.x=0.3, print.auc.y=0.1)
+
+roc(spam_test$spam.01, prob_pred, plot = TRUE, legacy.axes=TRUE, col="#377eb8", lwd = 2, print.auc = TRUE, print.auc.x=0.3, print.auc.y=0.1)
+title('Logistic Regression')
+
+#roc.info  <-  roc(spam_train$spam.01, glm.spam$fitted.values)
+#roc.df <- data.frame(
+#  tpp = roc.info$sensitivities*100,
+#  fpp = (1-roc.info$specificities)*100,
+#  thresholds = roc.info$thresholds
+#)
+#head(roc.df)
+#tail(roc.df)
+```
+```{r lval glm}
+cat(paste("l_val measure Logistic Regression = ",round(l_val(prob_pred),4),sep=""))
+rm(spam_test_s, spam_train_s, glm.spam, cm, mr_glm, y_pred)
+```
+
+### 3.2 Logistic regression fitted by Lasso (glmnet)
+With the lasso regression model the same procedure will be followed, but first the penalization factor lambda (\(\lambda\)) that reaches the best classification has to be found. To that end, we perform 10-fold CV using \texttt{cv.glmnet()} function.
+```{r 10-fold cross validation}
+cv.spam.lasso = cv.glmnet(x=as.matrix(spam_train[,-58]), y=spam_train[,58], alpha = 1, nfolds=10, family = "binomial")
+#cv.spam.lasso.me = cv.glmnet(x=as.matrix(spam_train[,-58]), y=spam_train[,58], alpha = 1, nfolds=10, family = "binomial", type.measure = "class")
+plot(cv.spam.lasso) # Binomial Deviance
+#plot(cv.spam.lasso.me) # Misclassification Error
+```
+We see that we can minimize the Binomial Deviance by applying approximately $-8 \leq log(\lambda) \leq -6$. The plot displays the cross-validation error according to the $log(\lambda)$. The left dashed vertical line indicates that the log of the optimal value of lambda is approximately $-7.5$, which is the one that minimizes the prediction error. This lambda value will give the most accurate model. 
+
+Not only does this minimize the Binomial Deviance but it also reduces the number of features to $54 \geq p \geq 49$. Generally, the purpose of regularization is to balance accuracy and simplicity. This means, a model with the smallest number of predictors that also gives a good accuracy. To this end, the function `cv.glmnet()` finds also the value of lambda that gives the simplest model but also lies within one standard error of the optimal value of lambda. This value is called lambda.1se.
+
+On the other hand, we see that we can minimize the Misclassification Error by applying approximately $-8 \leq log(\lambda) \leq -7$. Not only does this minimize the Mislassification Error but it also reduces the number of features to $55 \geq p \geq 54$
+
+From the cross validation, we decide to use the \emph{lambda.1se} because the accuracy with respect \emph{lambda.min} does not look very diminished and also in this way we obtain a simplified model with fewer variables.
+
+```{r lasso regression with best lambda}
+spam.lasso <- glmnet(x=as.matrix(spam_train[,-58]), y=spam_train[,58], alpha = 1, family = "binomial", intercept = TRUE, standardize = TRUE, lambda = cv.spam.lasso$lambda.1se)
+#coef(spam.lasso)
+```
+
+```{r prediction glm}
+# Predicting the test set
+prob_pred_las <- predict(spam.lasso, type = "response", newx = as.matrix(spam_test[,-58]))
+
+y_pred_las = ifelse(prob_pred_las > 0.5, 1, 0)
+
+# Making the Confusion Matrix
+cm = table(spam_test[, 58], y_pred_las > 0.5)
+mr_lasso <-  (cm[1,2]+cm[2,1])/sum(cm)
+cat(paste("Misclassification Rate Logistic Regression = ",round(mr_lasso,4),sep=""))
+```
+
+```{r ROC curve}
+par(pty="s")
+#roc(spam_train$spam.01, glm.spam$fitted.values, plot = TRUE, legacy.axes=TRUE, col="#377eb8", lwd = 2, print.auc = TRUE, print.auc.x=0.3, print.auc.y=0.1)
+
+roc(spam_test$spam.01, as.vector(prob_pred_las), plot = TRUE, legacy.axes=TRUE, col="tomato", lwd = 2, print.auc = TRUE, print.auc.x=0.3, print.auc.y=0.1)
+title('Lasso Regression')
+
+```
+```{r lval glm}
+cat(paste("l_val measure Lasso Regression = ",round(l_val(as.vector(prob_pred_las)),4),sep=""))
+rm(cv.spam.lasso, spam.lasso, y_pred_las, mr_lasso,cm)
+```
+
+### 3.3. k-nn binary regression 
+For the K-nearest neighbours, we first need to tune the number of neighbours (hyperparameter \(k\)). To that end, we create a function \texttt{KNN.KCV} that performs the desired number of cross validations and returns the misclassification error for each considered number of neighbours.
+
+```{r Tunning the hyperparameter k, warning=FALSE}
+KNN.KCV <- function(train, folds, Ks) {
+  train[,-58] <- scale(as.matrix(train[,-58],center=TRUE, scale=TRUE)) # center & standardize X
+  # Shuffle data
+  data <- train[sample(nrow(train)),]
+  # Create K equally size folds
+  folds <- cut(seq(1,nrow(data)), breaks=folds, labels=FALSE)
+  MR <- matrix(0, nrow = folds, ncol = length(Ks))
+  
+  # Perform k fold cross validation
+  for (i in 1:folds){
+    # Segment your data by fold using the which() function
+    testIndexes <- which(folds==i, arr.ind = TRUE)
+    train <- as.data.frame(data[-testIndexes,])
+    test <- as.data.frame(data[testIndexes,])
+
+    # Perform knn
+    for (k in 1:length(Ks)){
+      neighbours <- Ks[k]
+      y_pred <- knn(train = train[,-58], test = test[,-58], cl = train[,58], k = k, prob=TRUE)
+      cm = table(test[,58], y_pred)
+      MR[i,k] <- (cm[1,2]+cm[2,1])/sum(cm)
+    }
+    #Mean of the folds /K
+  }
+  MR <- colMeans(MR)
+  return(MR)
+}
+```
+
+By perfroming a 5 cross validation, we conclude that considering 3 neighbours gives the lowest misclassification rate (in the validation). Therefore, we use \(k=3\) in \texttt{knn()} of the \texttt{class} library.
+
+```{r, warning=FALSE}
+set.seed(123)
+neighbours = seq(1,25,length = 25)
+MR <- KNN.KCV(spam_train, 5, neighbours)
+MRdf <- data_frame(MR = MR, Neighbours = seq(1,25, length=25))
+ggplot(MRdf, aes(x=Neighbours, y=MR)) + geom_line() + theme_bw() + ylab("Missclassification Rate") + geom_vline(xintercept = 3, color = 'red', linetype='dotted')
+```
+```{r Prediction knn}
+set.seed(444)
+y_pred = knn(train = spam_train[, -58],
+             test = spam_test[, -58],
+             cl = spam_train[, 58],
+             k = 3,
+             prob = TRUE)
+
+prob <- attr(y_pred, "prob")
+prob <- 2*ifelse(y_pred == "1", 1-prob, prob) - 1
+# Making the Confusion Matrix
+cm = table(spam_test[, 58], y_pred)
+mr_knn <-  (cm[1,2]+cm[2,1])/sum(cm)
+cat(paste("Misclassification Rate Knn = ",round(mr_knn,4),sep=""))
+```
+
+```{r ROC knn}
+par(pty="s")
+
+roc(spam_test$spam.01, prob, plot = TRUE, legacy.axes=TRUE, col="palegreen4", lwd = 2, print.auc = TRUE, print.auc.x=0.3, print.auc.y=0.1)
+title('Knn Classifier')
+```
+
+```{r}
+cat(paste("l_val measure kNN = ",round(l_val(attr(y_pred, "prob")),4),sep=""))
+rm(cm, MR, mr_knn, neighbours, y_pred, KNN.KCV, MRdf)
+```
+
+### ROC Comparisson
+The model that gives the lowest missclassification rate is the Logistic regression performed with \texttt{glm()}, although it is very close to the rate achieved by Lasso Regression. Moreover, the $\ell_{val}$ measure of both models is almost identical too. It can be said that the two models have identical classification performance.  \\
+
+On the other hand, the classification performed by \texttt{Knn} is the worst one among the three models, with a misclassification rate of 0.2 and a lower $\ell_{val}$ measure.
+
+Having a look at the ROC curves and the AUC, the same scenario is encountered, Logistic and Lasso Regression are identical, with practically a perfect discrimination of emails; meanwhile Knn performs in a worse way than the other models. 
+
+```{r Three ROCs}
+par(mfrow = c(1, 3), pty="s")
+
+roc(spam_test$spam.01, prob_pred, plot = TRUE, legacy.axes=TRUE, col="#377eb8", lwd = 2, print.auc = TRUE, print.auc.x=0.4, print.auc.y=0.1, print.auc.cex=1)
+title('Logistic Regression')
+
+roc(spam_test$spam.01, as.vector(prob_pred_las), plot = TRUE, legacy.axes=TRUE, col="tomato", lwd = 2, print.auc = TRUE, print.auc.x=0.4, print.auc.y=0.1, print.auc.cex=1 )
+title('Lasso Regression')
+
+roc(spam_test$spam.01, prob, plot = TRUE, legacy.axes=TRUE, col="palegreen4", lwd = 2, print.auc = TRUE, print.auc.x=0.4, print.auc.y=0.1, print.auc.cex=1)
+title('Knn Classifier')
+```
+
+### Conclusions
+To conclude, the best choice of model would be the Lasso Regression with \texttt{glmnet()}, because in addition to show a precise classification, it performs a feature selection not considering some of the variables that Logistic Regression does. Also, the addition of the penalization parameter $\lambda$ makes Lasso less prone to over-fitting.

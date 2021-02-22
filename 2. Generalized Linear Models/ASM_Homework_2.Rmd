@@ -1,0 +1,408 @@
+---
+title: 'Homework 2: Logistic Regression'
+author: "Francesc Roy, Marcel Pons"
+date: "10/30/2020"
+output: pdf_document
+---
+```{r setup, include=FALSE, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+setwd("~/Documents/MIRI/3_ASM/Homeworks/2.GLM")
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(tibble)
+library(FactoMineR)
+library(gridExtra)
+library(effects)
+library(car)
+```
+
+# JYB-Dataset Description 
+The Banking Entity Just-Your-Bank (JBY) has the purpose of reducing the telemarketing costs by decreasing the number of calls to clients not likely to buy the product. 
+```{r import dataset, include=FALSE}
+path <- '/Users/Marcel/Documents/MIRI/3_ASM/Homeworks/2.GLM/JYB.csv'
+jyb_dataset <- read.csv(path, sep = ';', header = TRUE)
+rm(path)
+```
+
+The JYB dataset contains information of 28.846 calls and 21 variables, which can be divided by:
+- *Client attributes*: id, age, job, marital status, education level, default, housing and loan. 
+- *Call attributes*: phone type (contact), month and day of the week of the call. 
+- *Campaign attributes*: campaign (nº of contacts for client), pdays (nº of days passes since the customer was contacted), previous (nº of calls made to this client before this campaign), poutcome (previous campaign result).
+- *Indicators of the social and economic context*: emp.var.rate (employment variation rate), cons.price.idx (consumer price index), cons.conf.idx (consumer confidence index), euribor3m (euribor in 3 month), nr.employed (nº of employed).
+- *Response variable y*: customer subscribed to deposit? Yes/No. 
+
+```{r Summary and ordering}
+jyb_dataset$marital <- factor(jyb_dataset$marital, levels=c("single", "divorced", "married", "unknown"))
+jyb_dataset$default <- factor(jyb_dataset$default, levels=c("yes", "no", "unknown"))
+jyb_dataset$housing <- factor(jyb_dataset$housing, levels=c("yes", "no", "unknown"))
+jyb_dataset$loan <- factor(jyb_dataset$loan, levels=c("yes", "no", "unknown"))
+jyb_dataset$day_of_week <- factor(jyb_dataset$day_of_week, levels = c("mon","tue","wed","thu","fri"))
+jyb_dataset$poutcome <- factor(jyb_dataset$poutcome, levels = c("success","failure","nonexistent"))
+jyb_dataset$y <- factor(jyb_dataset$y, levels = c("yes","no"))
+jyb_dataset$c.age <- cut(jyb_dataset$age,breaks=c(16,32,38,47,98))
+
+jyb_dataset <- column_to_rownames(jyb_dataset, 'id')
+```
+
+```{r factorize pdays}
+jyb_dataset$c.pdays <- jyb_dataset$pdays
+pdays_modalities <- c("NotContacted","Contacted")
+jyb_dataset$c.pdays[which(jyb_dataset$c.pdays!=999)] <- pdays_modalities[2]
+jyb_dataset$c.pdays[which(jyb_dataset$c.pdays==999)] <- pdays_modalities[1]
+jyb_dataset$c.pdays <- as.factor(jyb_dataset$c.pdays)
+rm(pdays_modalities)
+
+summary(jyb_dataset[,c(21,22)])
+summary(jyb_dataset[,-c(1,12)])
+```
+
+# Exploratory Data Analysis
+```{r Age EDA}
+a1 <-  ggplot(jyb_dataset, aes(x=y, y=age)) + geom_boxplot() + labs(x='Subscription Result', y='Age') + theme_classic()
+
+by_age_y <- jyb_dataset %>%
+  filter(y == 'yes') %>%
+  group_by(c.age) %>% 
+  summarize(Yes = n())
+by_age_n <- jyb_dataset %>%
+  filter(y == 'no') %>%
+  group_by(c.age) %>% 
+  summarize(No = n())
+by_age <- by_age_y %>%
+  inner_join(by_age_n, by='c.age') %>% 
+  mutate(total = Yes + No) %>%
+  mutate(freq_y = Yes/total)
+
+a2 <- ggplot(by_age, aes(x=c.age, y=freq_y)) + geom_bar(stat='identity') + labs(x='Age Interval', y='Freq. Positive Subscription') + theme_classic() + scale_y_continuous(expand = c(0,0))
+
+grid.arrange(a1, a2, ncol = 2)
+rm(a1, by_age_n, by_age_y, by_age, a2)
+```
+
+```{r Months analysis}
+by_month_y <- jyb_dataset %>%
+  filter(y == 'yes') %>%
+  group_by(month) %>% 
+  summarize(count_y = n())
+by_month_n <- jyb_dataset %>%
+  filter(y == 'no') %>%
+  group_by(month) %>% 
+  summarize(count_n = n())
+by_month <- by_month_y %>%
+  inner_join(by_month_n, by='month') %>% 
+  mutate(total = count_y + count_n) %>%
+  mutate(freq_n = count_n/total, freq_y = count_y/total)
+
+##
+by_month$month <- factor(by_month$month, levels=c("mar", "apr","may", "jun", "jul", "aug", "sep", "oct","nov", "dec"))
+
+c1 <- ggplot(by_month, aes(month)) + 
+  geom_point(aes(y=freq_y, col="blue")) + geom_line(aes(group=1, y=freq_y, col='blue')) +
+  scale_color_manual(labels = c("Yes", "No"), values = c("blue", "blue")) +
+  labs(title = "", x = "", y = "Freq of Yes", color = "Type\n") + theme_bw() + theme(legend.position = "none")
+```
+
+```{r Context Variables}
+by_month_context <- jyb_dataset %>%
+  group_by(month) %>% 
+  summarize(emp.var.rate_m = mean(emp.var.rate), 
+            cons.price.idx_m = mean(cons.price.idx),
+            cons.conf.idx_m = mean(cons.conf.idx),
+            euribor3m_m = mean(euribor3m),
+            nr.employed_m = mean(nr.employed))
+by_month_context$month <- factor(by_month_context$month, levels=c("mar", "apr","may", "jun", "jul", "aug", "sep", "oct","nov", "dec"))
+
+c2 <- ggplot(by_month_context, aes(month)) + 
+  geom_point(aes(y=emp.var.rate_m, col="g")) + geom_line(aes(group=1, y=emp.var.rate_m, col='g')) +
+  labs(title = "", x = "", y = "Emp. Var. Rate") + theme_bw() + theme(legend.position = "none")
+c3 <- ggplot(by_month_context, aes(month)) + 
+  geom_point(aes(y=cons.price.idx_m, col="g")) + geom_line(aes(group=1, y=cons.price.idx_m, col='g')) +
+  labs(title = "", x = "", y = "Cons. Price Index") + theme_bw() + theme(legend.position = "none") 
+c4 <- ggplot(by_month_context, aes(month)) + 
+  geom_point(aes(y=cons.conf.idx_m, col="g")) + geom_line(aes(group=1, y=cons.conf.idx_m, col='g')) +
+  labs(title = "", x = "", y = "Cons. Conf. Index") + theme_bw() + theme(legend.position = "none")
+c5 <- ggplot(by_month_context, aes(month)) + 
+  geom_point(aes(y=euribor3m_m, col="g")) + geom_line(aes(group=1, y=euribor3m_m, col='g')) +
+  labs(title = "", x = "", y = "Euribor") + theme_bw() + theme(legend.position = "none")
+c6 <- ggplot(by_month_context, aes(month)) + 
+  geom_point(aes(y=nr.employed_m, col="g")) + geom_line(aes(group=1, y=nr.employed_m, col='g')) +
+  labs(title = "", x = "", y = "Nr. Employed") + theme_bw() + theme(legend.position = "none")
+grid.arrange(c1, c2, c3, c4, c5, c6, nrow = 2, ncol=3)
+rm(by_month, by_month_context, by_month_n, by_month_y, c1, c2, c3, c4, c5, c6)
+```
+
+```{r Week Varible}
+by_week_y <- jyb_dataset %>%
+  filter(y == 'yes') %>%
+  group_by(day_of_week) %>% 
+  summarize(count_y = n())
+by_week_n <- jyb_dataset %>%
+  filter(y == 'no') %>%
+  group_by(day_of_week) %>% 
+  summarize(count_n = n())
+by_week <- by_week_y %>%
+  inner_join(by_week_n, by='day_of_week') %>% 
+  mutate(total = count_y + count_n) %>%
+  mutate(freq_n = count_n/total, freq_y = count_y/total)
+
+e1 <-  ggplot(by_week, aes(x=day_of_week, y=freq_y)) + geom_bar(stat='identity') + labs(x='Day of Week', y='Positive Subcription') + theme_classic() + scale_y_continuous(expand = c(0,0))
+rm(by_week, by_week_n, by_week_y, e1)
+```
+```{r Education Variable}
+# Vamos a ver si la eduación tiene algo que ver con yes/no...
+by_education_y <- jyb_dataset %>%
+  filter(y == 'yes') %>%
+  group_by(education) %>% 
+  summarize(count_y = n())
+by_education_n <- jyb_dataset %>%
+  filter(y == 'no') %>%
+  group_by(education) %>% 
+  summarize(count_n = n())
+by_education <- by_education_y %>%
+  inner_join(by_education_n, by='education') %>% 
+  mutate(total = count_y + count_n) %>%
+  mutate(freq_n = count_n/total, freq_y = count_y/total)
+
+b1 <-  ggplot(by_education, aes(x=education, y=freq_y)) + geom_bar(stat='identity') + labs(x='Education', y='Positive Subcription') + theme_classic() + scale_y_continuous(expand = c(0,0))
+```
+```{r JobEDA}
+by_job_y <- jyb_dataset %>%
+  filter(y == 'yes') %>%
+  group_by(job) %>% 
+  summarize(count_y = n())
+by_job_n <- jyb_dataset %>%
+  filter(y == 'no') %>%
+  group_by(job) %>% 
+  summarize(count_n = n())
+by_job <- by_job_y %>%
+  inner_join(by_job_n, by='job') %>% 
+  mutate(total = count_y + count_n) %>%
+  mutate(freq_n = count_n/total, freq_y = count_y/total)
+
+b2 <-  ggplot(by_job, aes(x=job, y=freq_y)) + geom_bar(stat='identity') + labs(x='Job', y='Positive Subcription') + theme_classic() + scale_y_continuous(expand = c(0,0))
+```
+```{r maritalEDA}
+by_marital_y <- jyb_dataset %>%
+  filter(y == 'yes') %>%
+  group_by(marital) %>% 
+  summarize(count_y = n())
+by_marital_n <- jyb_dataset %>%
+  filter(y == 'no') %>%
+  group_by(marital) %>% 
+  summarize(count_n = n())
+by_marital <- by_marital_y %>%
+  inner_join(by_marital_n, by='marital') %>% 
+  mutate(total = count_y + count_n) %>%
+  mutate(freq_n = count_n/total, freq_y = count_y/total)
+
+b3 <-  ggplot(by_marital, aes(x=marital, y=freq_y)) + geom_bar(stat='identity') + labs(x='Marital', y='Positive Subcription') + theme_classic() + scale_y_continuous(expand = c(0,0))
+```
+```{r HousingEDA}
+by_housing_y <- jyb_dataset %>%
+  filter(y == 'yes') %>%
+  group_by(housing) %>% 
+  summarize(count_y = n())
+by_housing_n <- jyb_dataset %>%
+  filter(y == 'no') %>%
+  group_by(housing) %>% 
+  summarize(count_n = n())
+by_housing <- by_housing_y %>%
+  inner_join(by_housing_n, by='housing') %>% 
+  mutate(total = count_y + count_n) %>%
+  mutate(freq_n = count_n/total, freq_y = count_y/total)
+
+b4 <-  ggplot(by_housing, aes(x=housing, y=freq_y)) + geom_bar(stat='identity') + labs(x='Housing', y='Positive Subcription') + theme_classic() + scale_y_continuous(expand = c(0,0))
+```
+```{r LoanEDA}
+by_loan_y <- jyb_dataset %>%
+  filter(y == 'yes') %>%
+  group_by(loan) %>% 
+  summarize(count_y = n())
+by_loan_n <- jyb_dataset %>%
+  filter(y == 'no') %>%
+  group_by(loan) %>% 
+  summarize(count_n = n())
+by_loan <- by_loan_y %>%
+  inner_join(by_loan_n, by='loan') %>% 
+  mutate(total = count_y + count_n) %>%
+  mutate(freq_n = count_n/total, freq_y = count_y/total)
+
+b5 <-  ggplot(by_loan, aes(x=loan, y=freq_y)) + geom_bar(stat='identity') + labs(x='Loan', y='Positive Subcription') + theme_classic() + scale_y_continuous(expand = c(0,0))
+```
+```{r ContactEDA}
+by_contact_y <- jyb_dataset %>%
+  filter(y == 'yes') %>%
+  group_by(contact) %>% 
+  summarize(count_y = n())
+by_contact_n <- jyb_dataset %>%
+  filter(y == 'no') %>%
+  group_by(contact) %>% 
+  summarize(count_n = n())
+by_contact <- by_contact_y %>%
+  inner_join(by_contact_n, by='contact') %>% 
+  mutate(total = count_y + count_n) %>%
+  mutate(freq_n = count_n/total, freq_y = count_y/total)
+
+b6 <-  ggplot(by_contact, aes(x=contact, y=freq_y)) + geom_bar(stat='identity') + labs(x='Contact', y='Positive Subcription') + theme_classic() + scale_y_continuous(expand = c(0,0))
+```
+```{r poutcomeEDA}
+by_poutcome_y <- jyb_dataset %>%
+  filter(y == 'yes') %>%
+  group_by(poutcome) %>% 
+  summarize(count_y = n())
+by_poutcome_n <- jyb_dataset %>%
+  filter(y == 'no') %>%
+  group_by(poutcome) %>% 
+  summarize(count_n = n())
+by_poutcome <- by_poutcome_y %>%
+  inner_join(by_poutcome_n, by='poutcome') %>% 
+  mutate(total = count_y + count_n) %>%
+  mutate(freq_n = count_n/total, freq_y = count_y/total)
+
+b7 <-  ggplot(by_poutcome, aes(x=poutcome, y=freq_y)) + geom_bar(stat='identity') + labs(x='poutcome', y='Positive Subcription') + theme_classic() + scale_y_continuous(expand = c(0,0))
+```
+```{r cdaysEDA}
+by_c.pdays_y <- jyb_dataset %>%
+  filter(y == 'yes') %>%
+  group_by(c.pdays) %>% 
+  summarize(count_y = n())
+by_c.pdays_n <- jyb_dataset %>%
+  filter(y == 'no') %>%
+  group_by(c.pdays) %>% 
+  summarize(count_n = n())
+by_c.pdays <- by_c.pdays_y %>%
+  inner_join(by_c.pdays_n, by='c.pdays') %>% 
+  mutate(total = count_y + count_n) %>%
+  mutate(freq_n = count_n/total, freq_y = count_y/total)
+
+b8 <-  ggplot(by_c.pdays, aes(x=c.pdays, y=freq_y)) + geom_bar(stat='identity') + labs(x='Pdays', y='Positive Subcription') + theme_classic() + scale_y_continuous(expand = c(0,0))
+```
+
+```{r Grid and Removal}
+grid.arrange(b1, b2, nrow =1, ncol=2)
+grid.arrange(b3, b4, b5, b6, b7, b8, nrow = 2, ncol=3)
+rm(b1,b2,b3,b4,b5,b6,b7,b8, by_education, by_education_y, by_education_n)
+rm(by_loan, by_loan_y, by_loan_n, by_marital, by_marital_n, by_marital_y, by_poutcome, by_poutcome_n, by_poutcome_y, by_housing, by_housing_n, by_housing_y)
+rm(by_c.pdays,by_c.pdays_n, by_c.pdays_y, by_contact, by_contact_n, by_contact_y, by_job, by_job_n, by_job_y)
+```
+
+```{r}
+catdes(jyb_dataset,20)
+```
+
+# Aggregation 
+```{r}
+#Education
+jyb_dataset$education <- as.character(jyb_dataset$education)
+jyb_dataset$education[which(jyb_dataset$education == "illiterate")] <-  "basic"
+jyb_dataset$education[which(jyb_dataset$education == "basic.4y")] <-  "basic"
+jyb_dataset$education[which(jyb_dataset$education == "basic.6y")] <-  "basic"
+jyb_dataset$education[which(jyb_dataset$education == "basic.9y")] <-  "basic"
+jyb_dataset$education[which(jyb_dataset$education == "high.school")] <-  "literate"
+jyb_dataset$education[which(jyb_dataset$education == "professional.course")] <-  "literate"
+jyb_dataset$education[which(jyb_dataset$education == "university.degree")] <-  "literate"
+jyb_dataset$education <- as.factor(jyb_dataset$education)
+#summary(jyb_dataset$education)
+
+# Jobs
+jyb_dataset$job <- as.character(jyb_dataset$job)
+jyb_dataset$job[which(jyb_dataset$job == "student")] <-  "unemployed"
+jyb_dataset$job[which(jyb_dataset$job == "retired")] <-  "unemployed"
+jyb_dataset$job[which(jyb_dataset$job == "housemaid")] <-  "unemployed"
+jyb_dataset$job[which(jyb_dataset$job == "blue-collar")] <-  "lowlevel"
+jyb_dataset$job[which(jyb_dataset$job == "technician")] <-  "lowlevel"
+jyb_dataset$job[which(jyb_dataset$job == "admin.")] <-  "business"
+jyb_dataset$job[which(jyb_dataset$job == "management")] <-  "business"
+jyb_dataset$job[which(jyb_dataset$job == "entrepreneur")] <-  "qualified"
+jyb_dataset$job[which(jyb_dataset$job == "self-employed")] <-  "qualified"
+jyb_dataset$job <- as.factor(jyb_dataset$job)
+#summary(jyb_dataset$job)
+
+# Default
+jyb_dataset$default <- as.character(jyb_dataset$default)
+jyb_dataset$default[which(jyb_dataset$default == "yes")] <-  "unknown"
+jyb_dataset$default <- as.factor(jyb_dataset$default)
+#summary(jyb_dataset$default)
+summary(jyb_dataset[,c(2,4,5)])
+```
+
+
+# Fit the complete model without interactions using the logit link function
+```{r Before logistic regression}
+jyb_dataset <- jyb_dataset %>% select(c.age, job, marital, education, default, housing, loan, contact, month, day_of_week, campaign, c.pdays, previous, poutcome, emp.var.rate, cons.price.idx, cons.conf.idx, euribor3m, nr.employed, y)
+#summary(jyb_dataset)
+
+jyb_dataset$marital <- factor(jyb_dataset$marital, levels=c("unknown","single", "divorced", "married"))
+jyb_dataset$default <- factor(jyb_dataset$default, levels=c("unknown", "no"))
+jyb_dataset$housing <- factor(jyb_dataset$housing, levels=c("unknown","yes", "no"))
+jyb_dataset$loan <- factor(jyb_dataset$loan, levels=c("unknown", "yes","no"))
+jyb_dataset$day_of_week <- factor(jyb_dataset$day_of_week, levels = c("mon","tue","wed","thu","fri"))
+jyb_dataset$poutcome <- factor(jyb_dataset$poutcome, levels = c("success","failure","nonexistent"))
+jyb_dataset$month <- factor(jyb_dataset$month, levels=c("mar", "apr","may", "jun", "jul", "aug", "sep", "oct","nov", "dec"))
+jyb_dataset$y <- factor(jyb_dataset$y, levels = c("no","yes"))
+jyb_dataset$c.pdays <- factor(jyb_dataset$c.pdays, levels = c("NotContacted", "Contacted"))
+```
+
+```{r Logistic Regression}
+model1 <- glm(y ~ ., data = jyb_dataset, family = binomial)
+summary(model1)
+vif(model1) #loan perfect multicolinearity
+```
+
+# Evaluate possible first order interactions and include them in the model
+```{r Possible considered interactions}
+model2 <- glm(y ~ c.age*job + education*job, data=jyb_dataset, family=binomial)
+summary(model2)
+plot(allEffects(model2, ask=FALSE))
+```
+
+# Perform an automatic variable selection based on the AIC and BIC. Make a comparison between the models.
+```{r Steps}
+model3 <- glm(y ~ . + c.age*job + education*job, data=jyb_dataset, family=binomial)
+#summary(model3)
+model3_aic <- step(model3, direction='backward', k=2)
+#summary(model3_aic)
+model3_bic <- step(model3, direction='backward', k=log(nrow(jyb_dataset)))
+#summary(model3_bic)
+```
+
+```{r Deciding best model}
+anova(model3, model3_aic, test="Chis")
+anova(model3, model3_bic, test="Chis")
+ac <- AIC(model3_aic, model3_bic)
+bc <- BIC(model3_aic, model3_bic)
+```
+
+# Validate the model by checking assumptions
+```{r warining=FALSE}
+# Traditional Plots
+op <- par(mfrow=c(2,2))
+plot(model3)
+par(op)
+
+# Marginals Plot
+marginalModelPlots(model3)
+
+# Binned Plot
+binnedplot(fitted(model3), 
+           residuals(model3, type = "response"), 
+           nclass = NULL, 
+           xlab = "Expected Values", 
+           ylab = "Average residual", 
+           main = "Binned residual plot", 
+           cex.pts = 0.8, 
+           col.pts = 1, 
+           col.int = "gray")
+```
+
+# Interpret the final model
+```{r Final model}
+summary(model3_bic)
+```
+
+```{r Prediction newdata}
+dfnew = data.frame(c.age=c('(38,47]', '(16,32]'), job = c('lowlevel', 'unemployed'), marital=c('single','single'), education=c('basic', 'literate'), default=c('no', 'unknown'), housing=c('yes', 'no'), loan=c('no','no'), contact=c('cellular','cellular'), month=c('mar','jul'), day_of_week=c('tue', 'thu'), campaign=c(2,4), c.pdays=c('Contacted', 'NotContacted'), previous=c(0,0), poutcome=c('nonexistent','success'), emp.var.rate=c(-1.8, 1.4), cons.price.idx=c(92.843, 93.918), cons.conf.idx=c(-50.0,-42.7), euribor3m=c(1.510,4.962), nr.employed=c(5099.1,5228.1), y=c('yes', 'no'))
+predict(model3, newdata = dfnew[,-20], type="response")
+```
+

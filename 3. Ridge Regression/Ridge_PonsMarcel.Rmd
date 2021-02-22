@@ -1,0 +1,259 @@
+---
+title: "Ridge Regression Practise"
+author: "Marcel Pons Cloquells"
+date: "11/21/2020"
+output: html_document
+---
+In this homework, different techniques for choosing the penalization parameter \(\lambda\) on ridge regression will be addressed. More specifically, we are going to cover the parameter tunning based on: the validation set, k-fold cross-validation, leave-one-out cross-validation and generalized cross-validation. Moreover, for the first two
+aforementioned techniques, we will write their correspondind R functions.
+
+The choice of the best \(\lambda\) will be based on the minimization of the mean squared prediction error (MPSE). To that end, the Prostate data will be used, where we want to examine the correlation between the level of prostate-specific antigen (response variable \emph{lpsa}) and 8 clinical measures on 97 patients.
+
+```{r dataset, echo=FALSE}
+library(ggplot2)
+setwd("/Users/mponsclo/Library/Mobile Documents/com~apple~CloudDocs/3rd Term/4. Ridge Regression")
+prostate <- read.table("prostate_data.txt", header=TRUE, row.names = 1)
+
+head(prostate,5)
+```
+
+```{r inputs, include=FALSE}
+# Train sample
+train.sample <- which(prostate$train==TRUE)
+
+# Training Sample
+Y <- scale( prostate$lpsa[train.sample], center=TRUE, scale=FALSE)
+X <- scale( as.matrix(prostate[train.sample,1:8]), center=TRUE, scale=TRUE)
+
+# Validation Sample
+Yval <- scale( prostate$lpsa[-train.sample], center=TRUE, scale=FALSE)
+Xval <- scale( as.matrix(prostate[-train.sample,1:8]), center=TRUE, scale=TRUE)
+
+# Matrix dimensions
+n <- dim(X)[1]
+p <- dim(X)[2]
+
+# Vector of lambdas
+lambda.max <- 1e5 # Assess if the coefficients in lambda max reach 0
+n.lambdas <- 25
+lambda.v <- exp(seq(0,log(lambda.max+1),length=n.lambdas))-1
+```
+
+## Choise of $\lambda$ based on $MPSE_{val}(\lambda)$
+Using a validation set can be useful in order to find the best penalization parameter lambda for the ridge regression. We created the function PMSE.VAL() that has as inputs a matrix $x$ and a vector $y$ corresponding to the training sample; a matrix $x_{val}$ and vector $y_{val}$ corresponding to the validation set, and a vector of lambdas of canditate values for $\lambda$. Moreover, the function has the argument *plottype*, with the options "loglambda" and "dflambda".
+
+The main core of the function consists on a *for* loop in which for every $\lambda$ of the vector of lambdas the estimation of the coefficients beta ($\hat{\beta}$) are obtained (using the training set), which are used to obtain the predicted values of the response variable for the validation set. Finally, the PMSE is obtained by computing the average square distance between the true values of the validation set and the predicted ones. Here it is a snippet of the main code of the function:
+
+```{r include=FALSE}
+PMSE.VAL <- function(X, Y, X_val, Y_val, lambdas, plottype=c("loglambda","dflambda")){
+  plottype = match.arg(plottype)
+  PMSE.VAL <- numeric(length(lambdas))
+  XtX <- t(X)%*%X
+  p <- dim(X)[2]
+  for (l in 1:length(lambdas)){
+    lambda <- lambdas[l]
+    PMSE.VAL[l] <- 0
+    h.lambda.aux <- t(solve(XtX + lambda*diag(1,p))) %*% t(X)
+    betas <- h.lambda.aux %*% Y
+    hat.y <- X_val %*% betas # predicted values y.hat
+    PMSE.VAL[l] <- sum((Y_val-hat.y)^2)/length(Y_val)
+  }
+  
+  if (plottype=="loglambda"){
+    p1 <- plot(c(-1, log(1+lambdas[length(lambdas)])), range(PMSE.VAL),type="n",
+    xlab="log(1+lambda)",ylab="PMSE_VAL")
+    abline(v=log(1+lambdas[which.min(PMSE.VAL)]),lty=2, col=3)
+    for(j in 1:length(lambdas)){
+      points(log(1+lambdas[j]),PMSE.VAL[j],pch=19,cex=.7,col=4)
+      lines(log(1+lambdas),PMSE.VAL,pch=19,col=4)
+    }
+    return(list(PMSE.VAL,p1))
+  }
+  if (plottype=="dflambda"){
+    d2 <- eigen(XtX, symmetric = TRUE, only.values=TRUE)$values
+    df.v <- numeric(length(lambdas))
+    for (l in 1:length(lambdas)){
+      lambda <- lambdas[l]
+      df.v[l] <- sum(d2/(d2+lambda))
+    }
+      df.VAL <- df.v[which.min(PMSE.VAL)]
+      p2 <- plot(df.v, PMSE.VAL, xlab="df(lambda)",  ylab="PMSE_VAL")
+      abline(v=df.VAL,lty=2, col=3)
+      return(list(PMSE.VAL, df.VAL, p2))
+  }
+}
+```
+
+The function returns a vector of PMSE values for each $\lambda$ in the input vector of lambdas. If the *plottype* is "loglambda", a plot representing the different PMSE values with respect to the values of *log(1+$\lambda$)* is returned. Otherwise, if the *plottype* hyperparameter is "dflambda", a plot representing the different PMSE values with respect the effective degrees of freedom (df($\lambda$)) is returned (this option also returns the $df$ for the $\lambda$ that gives the minimum PPMSE).
+
+As an example, we call the function with *plottype* "loglambda":
+```{r Function Test}
+PMSE_val <- PMSE.VAL(X,Y,Xval,Yval, lambda.v, plottype = "loglambda")
+lambda.VAL <- lambda.v[which.min(PMSE_val[[1]])] # For the final comparison plot
+
+PMSE_val2 <- PMSE.VAL(X,Y,Xval,Yval, lambda.v, plottype = "dflambda")
+df.VAL <- PMSE_val2[[2]] #for the final comparison plot
+```
+
+## Choise of $\lambda$ based on $MPSE_{k-cv}(\lambda)$
+The k-Fold Cross Validation can also be very useful for selecting the best penalization parameter $\lambda$. We created the function PMSE.KCV() that has different inputs than the previous created function. With this function, validation data is not needed since now we use different folds, which are used in each iteration as validation data or training data. It is important that the data in the input has all the variables that we want to consider and excludes the ones not needed (like *train* in Prostate). Moreover, the input paremeter *y* is needed for specifying in which column is the response variable located. The data is centered and standardized inside the function. 
+The other parameters for the functions are the vector of lambdas, the *plottype* and $k$, used to specify into how many folds we want to split the data (*e.g.*, 5 for 5-fold CV).
+
+The main core of the function consists on first centering and standardizing the data. Then we randomly shuffle the data with sample() and afterwards we cut into k-folds. Then, *k* iterations are performed, where on each one a different fold is used as validation data and the others as training data. In each *k* iteration, in the inner *for* loop the PMSE is computed for each lambda (like in the previous function). When the outer *for* loop finishes, we have a matrix in which there are the values of PMSE for each lambda (columns) in k rows (for every iteration). We obtain the final PMSE vector computing the mean of each lambda for all the folds. 
+```{r include=FALSE}
+# Variables that we don't want have to be excluded (e.g. train)
+# The data is centered and standardized inside the function.
+# The argument y in the function refers to the numeric column of the response variable.
+
+PMSE.KCV <- function(data, K, lambdas, y, plottype=c("loglambda","dflambda")) {
+  plottype = match.arg(plottype)
+  data[,-c(y)] <- scale(as.matrix(data[,-c(y)],center=TRUE, scale=TRUE)) # center & standardize X
+  data[,y] <- scale(as.matrix(data[,y],center=TRUE, scale=FALSE)) # center the response var column
+  # Shuffle data
+  data <- data[sample(nrow(data)),]
+  # Create K equally size folds
+  folds <- cut(seq(1,nrow(data)), breaks=K, labels=FALSE)
+  PMSE <- matrix(0, nrow = K, ncol = length(lambdas))
+  
+  # Perform k fold cross validation
+  for (i in 1:K){
+    # Segment your data by fold using the which() function
+    testIndexes <- which(folds==i, arr.ind = TRUE)
+    X <- as.matrix(data[-testIndexes, -c(y)])
+    Y <- as.matrix(data[-testIndexes, y])
+    X_val <- as.matrix(data[testIndexes, -c(y)])
+    Y_val <- as.matrix(data[testIndexes, y])
+    
+    # Perform Regressions
+    p <- dim(X)[2]
+    for (l in 1:length(lambdas)){
+      lambda <- lambdas[l]
+      h.lambda.aux <- t(solve(t(X)%*%X + lambda*diag(1,p))) %*% t(X)
+      betas <- h.lambda.aux %*% Y
+      hat.y <- X_val %*% betas # predicted values y.hat
+      PMSE[i,l] <- sum((Y_val-hat.y)^2)/length(Y_val)
+    }
+    #Mean of the folds /K
+  }
+  PMSE.KCV <- colMeans(PMSE)
+  
+  if (plottype=="loglambda"){
+    p1 <- plot(c(-0.5, log(1+lambdas[length(lambdas)])), range(PMSE.KCV),type="n",
+    xlab="log(1+lambda)",ylab="PMSE_KCV")
+    abline(v=log(1+lambdas[which.min(PMSE.KCV)]),lty=2, col=3)
+    for(j in 1:length(lambdas)){
+      points(log(1+lambdas[j]),PMSE.KCV[j],pch=19,cex=.7,col=4)
+      lines(log(1+lambdas),PMSE.KCV,pch=19,col=4)
+    }
+    return(list(PMSE.KCV,p1))
+  }
+  if (plottype=="dflambda"){
+    XtX <- t(X)%*%X
+    d2 <- eigen(XtX, symmetric = TRUE, only.values=TRUE)$values
+    df.v <- numeric(length(lambdas))
+    for (l in 1:length(lambdas)){
+      lambda <- lambdas[l]
+      df.v[l] <- sum(d2/(d2+lambda))
+    }
+      df.KCV <- df.v[which.min(PMSE.KCV)] #for the final comparison plot
+      p2 <- plot(df.v, PMSE.KCV, xlab="df(lambda)",  ylab="PMSE_KCV")
+      abline(v=df.KCV,lty=2, col=3)
+      return(list(PMSE.KCV, df.KCV, p2))
+  }
+}
+```
+
+The output of this PMSE.KCV function is the same as the PMSE.VAL() function (both for "loglambda" or "dflambda").
+As an example, we call the function for k=5 and K=10 with *plottype* "loglambda":
+
+### 5-Fold CV
+```{r}
+set.seed(1717)
+PMSE.5KCV <- PMSE.KCV(prostate[,-10],K = 5, lambdas = lambda.v, y=9, plottype = "loglambda")
+lambda.5KCV <- lambda.v[which.min(PMSE.5KCV[[1]])] # For the final comparisson plot
+
+PMSE.5KCV <- PMSE.KCV(prostate[,-10],K = 5, lambdas = lambda.v, y=9, plottype = "dflambda")
+df.5folds <- PMSE.5KCV[[2]]
+```
+### 10-CV
+```{r}
+PMSE.10KCV <- PMSE.KCV(prostate[,-10],K = 10, lambdas = lambda.v, y=9, plottype = "loglambda")
+lambda.10KCV <- lambda.v[which.min(PMSE.10KCV[[1]])] # For the final comparisson plot
+
+PMSE.10KCV <- PMSE.KCV(prostate[,-10],K = 10, lambdas = lambda.v, y=9, plottype = "dflambda")
+df.10folds <- PMSE.10KCV[[2]]
+```
+
+## LOOCV and Generalized CV
+```{r include=FALSE}
+# Leave One Out Mode 2
+beta.path <- matrix(0,nrow=n.lambdas, ncol=p)
+diag.H.lambda <- matrix(0,nrow=n.lambdas, ncol=n)
+XtX <- t(X)%*%X
+d2 <- eigen(XtX, symmetric = TRUE, only.values=TRUE)$values
+df.v <- numeric(length(lambda.v))
+for (l in 1:length(lambda.v)){
+  lambda <- lambda.v[l]
+  df.v[l] <- sum(d2/(d2+lambda))
+}
+for (l in 1:n.lambdas){ 
+  lambda <- lambda.v[l]
+  H.lambda.aux <- t(solve(XtX + lambda*diag(1,p))) %*% t(X) 
+  beta.path[l,] <-  H.lambda.aux %*% Y
+  H.lambda <- X %*% H.lambda.aux 
+  diag.H.lambda[l,] <- diag(H.lambda)
+} 
+PMSE.CV.H.lambda <- numeric(n.lambdas)
+for (l in 1:n.lambdas){
+  lambda <- lambda.v[l]
+  hat.Y <- X %*% beta.path[l,]
+  PMSE.CV.H.lambda[l] <- sum( ((Y-hat.Y)/(1-diag.H.lambda[l,]))^2 )/n
+}
+lambda.CV.H.lambda <- lambda.v[which.min(PMSE.CV.H.lambda)]
+df.CV.H.lambda <- df.v[which.min(PMSE.CV.H.lambda)]
+```
+
+```{r echo=FALSE}
+plot(log(1+lambda.v), PMSE.CV.H.lambda)
+abline(v=log(1+lambda.CV.H.lambda),col=2,lty=2)
+
+plot(df.v, PMSE.CV.H.lambda)
+abline(v=df.CV.H.lambda,col=2,lty=2)
+```
+
+```{r include=FALSE}
+# Generalized Cross Validation
+PMSE.GCV <- numeric(n.lambdas)
+for (l in 1:n.lambdas){
+  lambda <- lambda.v[l]
+  hat.Y <- X %*% beta.path[l,]
+  nu <- sum(diag.H.lambda[l,])
+  PMSE.GCV[l] <- sum( ((Y-hat.Y)/(1-nu/n))^2 )/n
+}
+lambda.GCV <- lambda.v[which.min(PMSE.GCV)]
+df.GCV <- df.v[which.min(PMSE.GCV)]
+```
+
+```{r echo=FALSE}
+plot(log(1+lambda.v), PMSE.GCV)
+abline(v=log(1+lambda.GCV),col=2,lty=2)
+
+plot(df.v, PMSE.GCV)
+abline(v=df.GCV,col=2,lty=2)
+```
+
+## Comparison of the different tunning criteria
+```{r}
+df <- data.frame(df = df.v, PMSE_val = PMSE_val[[1]], PMSE.5KCV=PMSE.5KCV[[1]],PMSE.10KCV=PMSE.10KCV[[1]], PMSE_LOOCV = PMSE.CV.H.lambda, PMSE.GCV = PMSE.GCV)
+
+ggplot(df) + geom_point(aes(x=df.v, y=PMSE.GCV, col="PMSE.GV")) + geom_vline(xintercept=df.GCV, colour="seagreen4") +
+  geom_point(aes(x=df.v, y=PMSE_val, col="PMSE.VAL")) + geom_vline(xintercept=df.VAL, colour="violet") +
+  geom_point(aes(x=df.v, y=PMSE.5KCV, col="PMSE.5KCV")) + geom_vline(xintercept=df.5folds, colour="yellow4") +
+  geom_point(aes(x=df.v, y=PMSE.10KCV, col="PMSE.10KCV")) + geom_vline(xintercept=df.10folds, colour="tomato") +
+  geom_point(aes(x=df.v, y=PMSE_LOOCV, col="PMSE.LOOCV")) + geom_vline(xintercept=df.CV.H.lambda, colour="steelblue2") +
+  theme_bw() + labs(title=expression(paste("Comparison of the different ", lambda, " tunning techniques")), x=expression(paste("df(", lambda ,")")), y="PMSE", color="Criteria")
+#expression(paste("Value is ", sigma,"
+```
+From the plot it can be appreciated that the effective degrees of freedom for \emph{10KCV}, \emph{5KCV}, \emph{GCV} and \emph{LOOCV} are quite similar. On the other hand, the df($\lambda$) of \emph{PMSE.VAL} is the most different among all the criteria. Since df($\lambda$) \emph{PMSE.VAL} is smaller than the others, and knowing that the effective number of parameters (df) is a decreasing function of penalizing parameter $\lambda$, we conclude that the regression estimators following this criteria are more complex and flexible (having more possibility to over-fitting). \\
+
+The difference of \emph{PMSE.VAL} with respect to the others is possibly due to the fact that the $\lambda$ that minimizes PMSE is highly conditioned on the validation set. Furthermore, this fact is accentuated even more in small datasets, like the \emph{Prostate}, where we have 97 observations, 30 of which represent the validation set. Since the other techniques, like \emph{LOOCV} and \emph{KCV} use more observations as validation data, this problem is minimized (at the expanse of more computational complexity which increases the larger the dataset is).
